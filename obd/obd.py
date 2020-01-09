@@ -50,7 +50,7 @@ class OBD(object):
     """
 
     def __init__(self, portstr=None, baudrate=None, protocol=None, fast=True,
-                 timeout=0.1, check_voltage=True, start_low_power=False):
+                 timeout=0.1, check_voltage=True, start_low_power=False, connect=True):
         self.interface = None
         self.supported_commands = set(commands.base_commands())
         self.fast = fast  # global switch for disabling optimizations
@@ -60,13 +60,18 @@ class OBD(object):
         self.__frame_counts = {}  # keeps track of the number of return frames for each command
 
         logger.info("======================= python-OBD (v%s) =======================" % __version__)
-        self.__connect(portstr, baudrate, protocol,
+        if connect:
+            self.__connect(portstr, baudrate, protocol,
                        check_voltage, start_low_power)  # initialize by connecting and loading sensors
-        self.__load_commands()  # try to load the car's supported commands
+            self.__load_commands()  # try to load the car's supported commands
         logger.info("===================================================================")
 
-    def __connect(self, portstr, baudrate, protocol, check_voltage,
-                  start_low_power):
+    def connect(self, *args, **kwargs):
+        self.__connect(*args, **kwargs)
+        self.__load_commands()
+
+    def __connect(self, portstr=None, baudrate=None, protocol=None, check_voltage=True,
+                  start_low_power=False):
         """
             Attempts to instantiate an ELM327 connection object.
         """
