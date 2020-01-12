@@ -40,6 +40,7 @@
 from .__version__ import __version__
 from .obd import OBD
 from .asynchronous import Async
+from .redisobd import RedisOBD
 from .commands import commands
 from .OBDCommand import OBDCommand
 from .OBDResponse import OBDResponse
