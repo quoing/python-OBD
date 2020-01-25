@@ -7,6 +7,7 @@
 # Note: External RQ worker needs to be started.
 #
 
+import sys
 import time
 import threading
 import logging
@@ -17,6 +18,8 @@ from redis import Redis
 from redis.exceptions import LockError, LockNotOwnedError
 #from rq import Queue
 import json
+from pprint import pprint
+
 logger = logging.getLogger(__name__)
 
 def OBDResponse_to_json(data):
@@ -26,12 +29,36 @@ def OBDResponse_to_json(data):
                         "mode": data.command.mode,
                         "pid": data.command.pid,
                         },
-            "value": {
-                       "magnitude": data.value.magnitude,
-                       "unit": str(data.value.units),
-                     },
             "time": data.time,
           }
+
+    vtype = type(data.value).__name__
+    out["value_type"] = vtype
+
+    try:
+        if vtype == 'tuple':
+            out["value"] = str(data.value)
+        elif vtype=='Quantity':
+            out["value"] = data.value.magnitude
+            out["unit"] = str(data.value.units)
+        elif vtype=='Status':
+            #out["value"] += 
+            out["MIL"] = data.value.MIL
+            out["DTC_count"] = data.value.DTC_count
+            out["ignition_type"] = data.value.ignition_type
+            for i in obd.codes.BASE_TESTS:
+                out[i] = [ getattr(data.value, i).available, getattr(data.value, i).complete ]
+            if (data.value.ignition_type == 'spark'):
+                for i in obd.codes.SPARK_TESTS:
+                    if i != None: out[i] = [ getattr(data.value, i).available, getattr(data.value, i).complete ]
+            elif (data.value.ignition_type == 'compression'):
+                for i in obd.codes.COMPRESSION_TESTS:
+                    if i != None: out[i] = [ getattr(data.value, i).available, getattr(data.value, i).complete ]
+
+    except:
+        logger.error('Cannot read value {}'.format(type(data.value).__name__), exc_info=sys.exc_info())
+        pass
+
     return json.dumps(out)
 
 def OBDCommand_to_json(data):
@@ -87,6 +114,8 @@ class RedisOBD(OBD):
             out["Mode_"+str(mode)][pid] = OBDCommand_to_json(cmd)
         self.redis.set('supported_commands', json.dumps(out))
 
+        self.redis.set('elm_port', self.interface.port_name())
+
         if self.__thread is None:
             logger.info("Starting async thread")
             self.__running = True
@@ -125,18 +154,16 @@ class RedisOBD(OBD):
 
                 # new command being watched, store the command
                 logger.info("Watching command PID: %s" % str(pid))
-                self.redis.sadd('watch:'+str(mode)+':'+str(pid), 'local')
+                self.redis.sadd('watch:'+str(c.name), 'local')
 
         except LockError:
             # the lock wasn't acquired
             logger.warning("Can't aquire lock in watch()")
 
     def unwatch(self, c, callback=None):
-        pid = c.pid
-        mode = c.mode
         try:
             with self.redis.lock('watch_updating', blocking_timeout=1) as lock:
-                self.redis.srem('watch:'+str(mode)+':'+str(pid), 'local')
+                self.redis.srem('watch:'+str(c.name), 'local')
                 pass
         except LockError:
             # the lock wasn't acquired
@@ -153,9 +180,7 @@ class RedisOBD(OBD):
             logger.warning("Can't aquire lock in unwatch()")
 
     def query(self, c, force=False):
-        pid = c.pid
-        mode = c.mode
-        return self.redis.get('value:'+str(mode)+':'+str(pid))
+        return self.redis.get('value:'+str(c.name))
 
     def run(self):
         """ Daemon thread """
@@ -164,22 +189,20 @@ class RedisOBD(OBD):
         while self.__running:
             try:
                 with self.redis.lock('watch_updating', blocking_timeout=5) as lock:
-                    pids = self.redis.keys('watch:*')
+                    cmds = self.redis.keys('watch:*')
                     pass
             except LockError:
                 # the lock wasn't acquired
                 logger.warning("Can't aquire lock in unwatch()")
 
 
-            if len(pids) > 0:
+            if len(cmds) > 0:
                 t = time.perf_counter()
                 # loop over the requested commands, send, and collect the response
-                for watch_pid in pids:
-                    watch = watch_pid.split(b':')
+                for cmd in cmds:
+                    watch = cmd.split(b':')
                     logger.info('watch: {}'.format(watch))
-                    mode = int(watch[1])
-                    pid = int(watch[2])
-                    logger.info("mode: {}, pid {}".format(mode, pid))
+                    command_name = watch[1].decode('utf-8')
                     if not self.is_connected():
                         logger.info("Async thread terminated because device disconnected")
                         self.__running = False
@@ -187,17 +210,23 @@ class RedisOBD(OBD):
                         return
 
                     # force, since commands are checked for support in watch()
-                    r = super(RedisOBD, self).query(obd.commands[mode][pid], force=True)
-
+                    #if (obd.commands.has_command(obd.commands[command_name])):
+                    #    logger.error("Command {} not found in command table.".format(command_name))
+                    r = super(RedisOBD, self).query(obd.commands[command_name], force=True)
                     # store the response
-                    response = OBDResponse_to_json(r)
-                    self.redis.set('value:'+str(mode)+':'+str(pid), response)
-                    self.redis.publish('value:'+str(mode)+':'+str(pid), response)
+                    try:
+                        response = OBDResponse_to_json(r)
+                    except:
+                        #response = type(r.value).__name__
+                        logger.exception('Cannot read response.', exc_info=sys.exc_info())
+                        pass
+                    self.redis.set('value:'+str(command_name), response)
+                    self.redis.publish('value:'+str(command_name), response)
 
                     # fire the callbacks, if there are any
                     #for callback in self.__callbacks[c]:
                      #   callback(r)
-                self.redis.publish('collect_time', time.perf_counter() - t)
+                self.redis.publish('status:collect_time', time.perf_counter() - t)
                 time.sleep(self.__delay_cmds)
 
             else:
